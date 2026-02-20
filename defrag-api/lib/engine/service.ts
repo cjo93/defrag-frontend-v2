@@ -13,10 +13,22 @@ import {
 
 const ENGINE_VERSION = "1.0.0";
 
+// Simple In-Memory Rate Limit
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const rateLimitMap = new Map<string, number>();
+
+export function checkRateLimit(key: string): boolean {
+  const now = Date.now();
+  const last = rateLimitMap.get(key) || 0;
+  if (now - last < RATE_LIMIT_WINDOW) return false;
+  rateLimitMap.set(key, now);
+  // Cleanup old keys
+  if (rateLimitMap.size > 1000) rateLimitMap.clear();
+  return true;
+}
+
 // Canonical JSON Hashing
 function hashInputs(inputs: any): string {
-  // Sort keys recursively? For V1 flat inputs object is enough.
-  // Actually, let's just use a stable stringify if available, or sort keys.
   const keys = Object.keys(inputs).sort();
   const sortedObj: any = {};
   keys.forEach(k => sortedObj[k] = inputs[k]);
@@ -94,12 +106,24 @@ async function recomputeDailyWeather(
   city: string,
   inputsHash: string
 ): Promise<DailyWeatherOutput | null> {
-  // Fetch wider window to ensure local day coverage
+  // STRICT WINDOW: Local Day 00:00 - 23:59 converted to UTC
+  // dateLocal is "YYYY-MM-DD"
+
+  // Construct Start of Day in Local Time
+  // We use string manipulation to avoid browser timezone issues
+  // "YYYY-MM-DD" + "T00:00:00"
+  // Note: Date parsing is tricky. Ideally use a library like 'date-fns-tz' but we are stdlib only.
+  // Best approach for backend: Treat dateLocal as the date in the user's timezone.
+
+  // 1. Find UTC start/end for that local date.
+  // We need to fetch enough hours from Horizons to cover it.
+  // Since we don't have a timezone library, we will fetch a generous 48h window (local date -1 to +2)
+  // and then FILTER strictly based on the converted timestamp.
+  // This ensures we have the data without needing precise UTC offset calc upfront.
+
   const d = new Date(dateLocal);
-  const start = new Date(d);
-  start.setDate(start.getDate() - 1);
-  const end = new Date(d);
-  end.setDate(end.getDate() + 2);
+  const start = new Date(d); start.setDate(d.getDate() - 1);
+  const end = new Date(d); end.setDate(d.getDate() + 2);
 
   const startUtc = start.toISOString().split("T")[0];
   const stopUtc = end.toISOString().split("T")[0];
@@ -115,7 +139,7 @@ async function recomputeDailyWeather(
 
     // Store run
     const runRes = await supabaseAdmin.from("horizons_runs").insert({
-      user_id: userId, // Service role writes
+      user_id: userId,
       kind: "daily_weather",
       request_json: params,
       raw_text: horizons.rawText,
@@ -127,15 +151,12 @@ async function recomputeDailyWeather(
 
     const horizonsRunId = runRes.data?.id;
 
-    // Filter steps for local day
+    // Filter steps strictly for local day
     const steps: { t_utc: string; lon: Record<string, number> }[] = [];
-    // horizons.parsed["10"] exists
     const timestamps = horizons.parsed["10"]?.map(x => x.date) || [];
 
     for (let i = 0; i < timestamps.length; i++) {
       const t = timestamps[i];
-      // t format: "2026-Jan-28 00:00"
-      // Convert to Date object (UTC)
       const dateObj = new Date(t + " UTC");
 
       // Check local date string in user timezone
@@ -200,7 +221,6 @@ export async function getBaselineVector(
   if (cached) return cached as BaselineVectorOutput;
 
   // Recompute
-  // Fetch day of birth
   const startUtc = dob;
   const d = new Date(dob);
   const nextD = new Date(d); nextD.setDate(d.getDate() + 1);
@@ -215,7 +235,6 @@ export async function getBaselineVector(
   try {
     const horizons = await fetchHorizonsEphemeris(params);
 
-     // Store run
      const runRes = await supabaseAdmin.from("horizons_runs").insert({
       user_id: userId,
       kind: "baseline",
@@ -228,7 +247,7 @@ export async function getBaselineVector(
     }).select("id").single();
     const horizonsRunId = runRes.data?.id;
 
-    // Find nearest step to birth time (or 12:00 if null)
+    // Find nearest step to birth time
     const targetHour = birthTime ? parseInt(birthTime.split(":")[0]) : 12;
     const timestamps = horizons.parsed["10"]?.map(x => x.date) || [];
 
@@ -236,7 +255,7 @@ export async function getBaselineVector(
     let minDiff = 24;
 
     for (let i = 0; i < timestamps.length; i++) {
-        const tStr = timestamps[i].split(" ")[1]; // "13:00"
+        const tStr = timestamps[i].split(" ")[1];
         if (!tStr) continue;
         const h = parseInt(tStr.split(":")[0]);
         const diff = Math.abs(h - targetHour);

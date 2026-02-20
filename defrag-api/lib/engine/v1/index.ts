@@ -6,6 +6,7 @@ export type Provenance = {
   computed_at_utc: string;
 };
 
+// Removed raw step data from output type to ensure hygiene
 export type DailyWeatherOutput = {
   date_local: string;
   timezone: string;

@@ -77,6 +77,10 @@ function parseHorizonsResponse(text: string) {
     const parts = line.split(",").map(p => p.trim());
     if (parts.length < 3) return null;
 
+    // Ecliptic Longitude is typically the 2nd column in Quantities 31 CSV output
+    // But format can be quirky.
+    // Example: 2026-Jan-28 00:00, 308.12345, -0.12345
+    // index 0 is Date, 1 is Lon, 2 is Lat.
     const lon = parseFloat(parts[1]);
     const lat = parseFloat(parts[2]);
 
