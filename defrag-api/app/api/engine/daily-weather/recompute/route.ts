@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { corsHeaders, handleOptions } from "@/lib/cors";
-import { requireUserId } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { errorToResponse } from "@/lib/responses";
-import { getDailyWeather } from "@/lib/engine/service";
+import { getDailyWeather, checkRateLimit } from "@/lib/engine/service";
+import { ENV } from "@/lib/env";
 
 const Body = z.object({
+  userId: z.string().uuid(),
   dateLocal: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
@@ -15,9 +16,21 @@ export async function OPTIONS(req: Request) { return handleOptions(req); }
 export async function POST(req: Request) {
   try {
     const headers = corsHeaders(req);
-    const userId = await requireUserId(req);
+
+    // Admin Check
+    const adminKey = req.headers.get("x-defrag-admin-key");
+    if (!adminKey || adminKey !== ENV.DEFRAG_ADMIN_KEY) {
+      return new NextResponse("Unauthorized", { status: 401, headers });
+    }
+
+    // Rate Limit
+    const ip = req.headers.get("x-forwarded-for") || "unknown";
+    if (!checkRateLimit("recompute:" + ip)) {
+      return new NextResponse("Too Many Requests", { status: 429, headers });
+    }
 
     const body = Body.parse(await req.json());
+    const userId = body.userId;
 
     // Fetch context
     const { data: ctx } = await supabaseAdmin.from("user_context").select("city,timezone").eq("user_id", userId).maybeSingle();

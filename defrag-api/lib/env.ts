@@ -17,4 +17,6 @@ export const ENV = {
 
   AI_GATEWAY_URL: mustGetEnv("AI_GATEWAY_URL"),
   OPENAI_API_KEY: mustGetEnv("OPENAI_API_KEY"),
+
+  DEFRAG_ADMIN_KEY: mustGetEnv("DEFRAG_ADMIN_KEY"),
 };
