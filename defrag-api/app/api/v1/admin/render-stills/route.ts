@@ -1,77 +1,123 @@
 import { NextResponse } from "next/server";
-import { env } from "@/lib/env";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { renderStillFromHash } from "@/lib/render/stills/renderStill";
 import { uploadPngToR2 } from "@/lib/storage/r2";
+import { renderStill } from "@/lib/render/stills/renderStill";
+import type { RenderInputs } from "@/lib/render/stills/types";
 
 export const runtime = "nodejs";
 
-function requireAdminKey(req: Request) {
-  const key = req.headers.get("x-defrag-admin-key") || "";
-  if (!env.DEFRAG_ADMIN_KEY || key !== env.DEFRAG_ADMIN_KEY) {
-    return false;
-  }
+function requireAdmin(req: Request) {
+  const a = req.headers.get("authorization");
+  const k = req.headers.get("x-defrag-admin-key");
+  // Check Cron Secret (Bearer) OR Admin Key (x-defrag-admin-key)
+  const okBearer = a && process.env.CRON_SECRET && a === `Bearer ${process.env.CRON_SECRET}`;
+  const okKey = k && process.env.DEFRAG_ADMIN_KEY && k === process.env.DEFRAG_ADMIN_KEY;
+  if (!okBearer && !okKey) return false;
   return true;
 }
 
 export async function POST(req: Request) {
-  if (!requireAdminKey(req)) {
-    return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
-  }
+  if (!requireAdmin(req)) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
 
-  const { searchParams } = new URL(req.url);
-  const limit = Math.min(parseInt(searchParams.get("limit") || "25", 10), 100);
+  const limit = Math.min(parseInt(new URL(req.url).searchParams.get("limit") || "25", 10), 50);
 
-  // Only consume asset_cache_public. Never touches frags/events.
-  const { data: rows, error } = await supabaseAdmin
+  // 1) Fetch candidates (public)
+  const { data: candidates, error: candErr } = await supabaseAdmin
     .from("asset_cache_public")
-    .select("hash,type,status")
+    .select("hash, type, status")
     .eq("type", "STILL")
-    .in("status", ["MISSING", "FAILED"])
+    .in("status", ["MISSING", "QUEUED"])
     .limit(limit);
 
-  if (error) {
-    return NextResponse.json({ error: "DB_ERROR", detail: error.message }, { status: 500 });
+  if (candErr) {
+    return NextResponse.json({ ok: false, error: candErr.message }, { status: 500 });
   }
 
-  let rendered = 0;
-  const results: any[] = [];
+  if (!candidates || candidates.length === 0) {
+    return NextResponse.json({ ok: true, processed: 0, results: [] });
+  }
 
-  for (const row of rows ?? []) {
-    const hash = row.hash as string;
+  const results: Array<{ hash: string; status: "READY" | "FAILED" }> = [];
+
+  for (const c of candidates) {
+    const hash = c.hash;
+
     try {
-      // mark queued (best-effort)
+      // 2a) Mark as QUEUED (idempotent)
       await supabaseAdmin
         .from("asset_cache_public")
         .update({ status: "QUEUED" })
         .eq("hash", hash);
 
-      const { png, width, height } = renderStillFromHash(hash);
-      const key = `stills/${hash}.png`;
-      const { publicUrl } = await uploadPngToR2({ key, body: png });
+      // 2b) Load private params (service role only table)
+      // We select the discrete columns to map to RenderInputs
+      const { data: priv, error: privErr } = await supabaseAdmin
+        .from("asset_cache_private")
+        .select("*")
+        .eq("hash", hash)
+        .maybeSingle();
 
-      await supabaseAdmin
+      if (privErr || !priv) {
+        await supabaseAdmin
+          .from("asset_cache_public")
+          .update({ status: "FAILED", url: null, width: null, height: null, duration_seconds: null })
+          .eq("hash", hash);
+
+        results.push({ hash, status: "FAILED" });
+        continue;
+      }
+
+      // Map discrete DB columns to RenderInputs
+      const inputs: RenderInputs = {
+        hash: hash,
+        userClass: priv.user_class,
+        targetClass: priv.target_class,
+        pressureBucket: priv.pressure_bucket,
+        fidelityBucket: priv.fidelity_bucket,
+        frictionBracket10: priv.friction_bracket10,
+        assetVersion: priv.asset_version,
+      };
+
+      // 2c) Render
+      const rendered = await renderStill(inputs);
+
+      // 2d) Upload
+      const key = `stills/${hash}.png`;
+      const uploaded = await uploadPngToR2({
+        key,
+        body: rendered.png,
+        cacheControl: "public, max-age=31536000, immutable",
+      });
+
+      // 2e) Update public record
+      const { error: updErr } = await supabaseAdmin
         .from("asset_cache_public")
         .update({
           status: "READY",
-          url: publicUrl,
-          width,
-          height,
+          url: uploaded.url,
+          width: rendered.width,
+          height: rendered.height,
           duration_seconds: null,
         })
         .eq("hash", hash);
 
-      rendered++;
-      results.push({ hash, ok: true, url: publicUrl });
+      if (updErr) throw new Error(updErr.message);
+
+      results.push({ hash, status: "READY" });
     } catch (e: any) {
+      // fail-closed
       await supabaseAdmin
         .from("asset_cache_public")
-        .update({ status: "FAILED" })
+        .update({ status: "FAILED", url: null, width: null, height: null, duration_seconds: null })
         .eq("hash", hash);
 
-      results.push({ hash, ok: false, error: e?.message || "RENDER_FAILED" });
+      results.push({ hash, status: "FAILED" });
     }
   }
 
-  return NextResponse.json({ ok: true, requested: rows?.length ?? 0, rendered, results });
+  const processed = results.length;
+  const ready = results.filter((r) => r.status === "READY").length;
+  const failed = results.filter((r) => r.status === "FAILED").length;
+
+  return NextResponse.json({ ok: true, processed, ready, failed, results });
 }

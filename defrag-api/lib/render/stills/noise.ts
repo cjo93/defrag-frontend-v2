@@ -1,22 +1,20 @@
 import seedrandom from "seedrandom";
 
-// Deterministic monochrome noise overlay (subtle). No gradients in background.
-// Returns an SVG layer string to be composited before rasterization.
-export function buildNoiseSvg(width: number, height: number, seed: string, intensity = 0.06): string {
+export function seededNoise(seed: string) {
   const rng = seedrandom(seed);
-  const dots = 1400; // keep light for perf
+  return () => rng(); // 0..1
+}
 
-  let circles = "";
-  for (let i = 0; i < dots; i++) {
-    const x = Math.floor(rng() * width);
-    const y = Math.floor(rng() * height);
-    const r = 0.6 + rng() * 1.3;
-    const a = (rng() * intensity).toFixed(4);
-    circles += `<circle cx="${x}" cy="${y}" r="${r.toFixed(2)}" fill="#FFFFFF" fill-opacity="${a}" />`;
+export function noisePoints(seed: string, count: number, w: number, h: number) {
+  const rnd = seededNoise(seed);
+  const pts: Array<{ x: number; y: number; r: number; a: number }> = [];
+  for (let i = 0; i < count; i++) {
+    pts.push({
+      x: Math.floor(rnd() * w),
+      y: Math.floor(rnd() * h),
+      r: 0.5 + rnd() * 1.8,
+      a: 0.04 + rnd() * 0.10,
+    });
   }
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
-  ${circles}
-</svg>`;
+  return pts;
 }

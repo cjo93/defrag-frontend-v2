@@ -13,9 +13,10 @@ export function r2Client() {
 }
 
 export async function uploadPngToR2(args: {
-  key: string; // e.g. "stills/<hash>.png"
-  body: Buffer;
-  cacheSeconds?: number; // CDN cache
+  key: string;
+  body: Buffer | Uint8Array;
+  contentType?: string;
+  cacheControl?: string;
 }) {
   const s3 = r2Client();
   await s3.send(
@@ -23,11 +24,14 @@ export async function uploadPngToR2(args: {
       Bucket: env.R2_BUCKET,
       Key: args.key,
       Body: args.body,
-      ContentType: "image/png",
-      CacheControl: `public, max-age=${args.cacheSeconds ?? 31536000}, immutable`,
+      ContentType: args.contentType || "image/png",
+      CacheControl: args.cacheControl ?? "public, max-age=31536000, immutable",
     })
   );
 
   const publicUrl = `${env.R2_PUBLIC_BASE_URL.replace(/\/$/, "")}/${args.key}`;
   return { publicUrl };
 }
+
+// Alias for compatibility with provided code
+export const putPublicObject = uploadPngToR2;

@@ -163,3 +163,140 @@ create policy "engine_outputs_select_own" on public.engine_outputs
 -- engine_outputs: Service role writes (or user if we allowed client-side compute, but we don't)
 create policy "engine_outputs_insert_service" on public.engine_outputs
   for insert with check (true); -- Service role bypasses RLS anyway, this is just explicit if needed
+
+-- =========
+-- Helpers
+-- =========
+create or replace function set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end $$;
+
+-- ======================
+-- pinned_connections
+-- ======================
+create table if not exists pinned_connections (
+  user_id uuid not null references profiles(user_id) on delete cascade,
+  connection_id uuid not null references connections(id) on delete cascade,
+  pinned_at timestamptz not null default now(),
+  primary key (user_id, connection_id)
+);
+alter table pinned_connections enable row level security;
+
+create policy "pinned_select_own" on pinned_connections
+  for select using (auth.uid() = user_id);
+
+create policy "pinned_write_own" on pinned_connections
+  for insert with check (
+    auth.uid() = user_id
+    and exists (
+      select 1 from connections c
+      where c.id = connection_id and c.user_id = auth.uid()
+    )
+  );
+
+create policy "pinned_delete_own" on pinned_connections
+  for delete using (auth.uid() = user_id);
+
+-- ======================
+-- friction_events
+-- ======================
+create table if not exists friction_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references profiles(user_id) on delete cascade,
+  connection_id uuid not null references connections(id) on delete cascade,
+  event_date date not null,
+  engine_version text not null,
+  pressure_score int not null check (pressure_score between 0 and 100),
+  friction_score int not null check (friction_score between 0 and 100),
+  friction_delta int, -- signed: today - yesterday
+  primary_gate text not null default 'NONE',
+  fidelity_bucket text not null check (fidelity_bucket in ('HIGH','MEDIUM','LOW')),
+  asset_hash text not null,
+  provenance_hash text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, connection_id, event_date, engine_version)
+);
+create index if not exists friction_events_user_date_idx on friction_events(user_id, event_date);
+alter table friction_events enable row level security;
+
+create policy "friction_select_own" on friction_events
+  for select using (auth.uid() = user_id);
+
+create trigger trg_set_updated_at_friction_events
+before update on friction_events
+for each row execute function set_updated_at();
+
+-- ======================
+-- daily_frags
+-- ======================
+create table if not exists daily_frags (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references profiles(user_id) on delete cascade,
+  local_date date not null,
+  engine_version text not null,
+  top_event_id uuid references friction_events(id) on delete set null,
+  simple_text_state text not null,
+  simple_text_action text not null,
+  asset_hash text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, local_date, engine_version)
+);
+create index if not exists daily_frags_user_date_idx on daily_frags(user_id, local_date);
+alter table daily_frags enable row level security;
+
+create policy "daily_frags_select_own" on daily_frags
+  for select using (auth.uid() = user_id);
+
+create trigger trg_set_updated_at_daily_frags
+before update on daily_frags
+for each row execute function set_updated_at();
+
+-- ======================
+-- asset_cache_public (delivery only; safe to expose)
+-- ======================
+create table if not exists asset_cache_public (
+  hash text primary key,
+  type text not null check (type in ('STILL','VIDEO')),
+  status text not null check (status in ('MISSING','QUEUED','READY','FAILED')),
+  url text,
+  width int,
+  height int,
+  duration_seconds int,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table asset_cache_public enable row level security;
+
+create policy "asset_cache_public_read_auth" on asset_cache_public
+  for select using (auth.role() = 'authenticated');
+
+create trigger trg_set_updated_at_asset_cache_public
+before update on asset_cache_public
+for each row execute function set_updated_at();
+
+-- ======================
+-- asset_cache_private (service-role only; reconstruction fields)
+-- ======================
+create table if not exists asset_cache_private (
+  hash text primary key references asset_cache_public(hash) on delete cascade,
+  canonical text not null,
+  user_class text not null,
+  target_class text not null,
+  pressure_bucket text not null check (pressure_bucket in ('LOW','MED','HIGH')),
+  fidelity_bucket text not null check (fidelity_bucket in ('HIGH','MEDIUM','LOW')),
+  friction_bracket10 int not null check (friction_bracket10 in (0,10,20,30,40,50,60,70,80,90,100)),
+  asset_version text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table asset_cache_private enable row level security;
+
+-- IMPORTANT: no SELECT policies. Service role only.
+create trigger trg_set_updated_at_asset_cache_private
+before update on asset_cache_private
+for each row execute function set_updated_at();
