@@ -19,4 +19,14 @@ export const ENV = {
   OPENAI_API_KEY: mustGetEnv("OPENAI_API_KEY"),
 
   DEFRAG_ADMIN_KEY: mustGetEnv("DEFRAG_ADMIN_KEY"),
+
+  // Phase 3
+  R2_ENDPOINT: mustGetEnv("R2_ENDPOINT"),
+  R2_ACCESS_KEY_ID: mustGetEnv("R2_ACCESS_KEY_ID"),
+  R2_SECRET_ACCESS_KEY: mustGetEnv("R2_SECRET_ACCESS_KEY"),
+  R2_BUCKET: mustGetEnv("R2_BUCKET"),
+  R2_PUBLIC_BASE_URL: mustGetEnv("R2_PUBLIC_BASE_URL"),
 };
+
+// Alias for compatibility with new code
+export const env = ENV;
