@@ -114,3 +114,52 @@ for insert with check (
       and c.user_id = auth.uid()
   )
 );
+
+-- ENGINE PROVENANCE & CACHING
+
+create table if not exists public.horizons_runs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references public.profiles(user_id) on delete set null,
+  kind text not null, -- daily_weather | baseline
+  request_json jsonb not null,
+  raw_text text not null,
+  raw_hash text not null,
+  start_utc timestamptz not null,
+  stop_utc timestamptz not null,
+  step_minutes int not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.engine_outputs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references public.profiles(user_id) on delete cascade,
+  subject_id uuid, -- nullable, for connection friction target
+  kind text not null, -- daily_weather | baseline_vector | friction
+  engine_version text not null default '1.0.0',
+  date_local date, -- nullable for baseline_vector
+  inputs_hash text not null,
+  output_json jsonb not null,
+  horizons_run_id uuid references public.horizons_runs(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+-- Unique index for caching
+create unique index if not exists idx_engine_outputs_cache
+  on public.engine_outputs (user_id, kind, engine_version, inputs_hash, date_local, subject_id)
+  nulls not distinct;
+
+-- RLS
+alter table public.horizons_runs enable row level security;
+alter table public.engine_outputs enable row level security;
+
+-- horizons_runs: Service role only by default (no user select)
+create policy "horizons_runs_service_role" on public.horizons_runs
+  for all using (false); -- Implicitly allows service_role to bypass
+
+-- engine_outputs: User can read their own
+create policy "engine_outputs_select_own" on public.engine_outputs
+  for select using (auth.uid() = user_id);
+
+-- engine_outputs: Service role writes (or user if we allowed client-side compute, but we don't)
+create policy "engine_outputs_insert_service" on public.engine_outputs
+  for insert with check (true); -- Service role bypasses RLS anyway, this is just explicit if needed

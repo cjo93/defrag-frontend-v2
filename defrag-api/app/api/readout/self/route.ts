@@ -4,6 +4,8 @@ import { requireUserId } from "@/lib/auth";
 import { requireBlueprintOrOS } from "@/lib/gating";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { errorToResponse } from "@/lib/responses";
+// Direct Import of service functions
+import { getDailyWeather, getBaselineVector } from "@/lib/engine/service";
 
 export async function OPTIONS(req: Request) { return handleOptions(req); }
 
@@ -15,26 +17,54 @@ export async function GET(req: Request) {
     // Gate
     await requireBlueprintOrOS(userId);
 
-    // Ensure baseline exists; if not, instruct frontend
-    const { data: baseline } = await supabaseAdmin
-      .from("baselines")
-      .select("dob,birth_time,birth_city")
-      .eq("user_id", userId)
-      .maybeSingle();
+    // Fetch baseline & context
+    const [baseRes, ctxRes] = await Promise.all([
+      supabaseAdmin.from("baselines").select("dob,birth_time,birth_city").eq("user_id", userId).maybeSingle(),
+      supabaseAdmin.from("user_context").select("city,timezone").eq("user_id", userId).maybeSingle(),
+    ]);
 
-    if (!baseline) {
+    if (!baseRes.data) {
       return NextResponse.json({ locked: false, needs_baseline: true }, { headers });
     }
 
-    // V1: deterministic “manual” placeholders (no engine logic revealed)
+    const city = ctxRes.data?.city || baseRes.data.birth_city;
+    const timezone = ctxRes.data?.timezone || "UTC";
+
+    // Current time in their timezone -> Local Date
+    const now = new Date();
+    // Use Intl to get YYYY-MM-DD
+    const dateLocal = new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(now);
+
+    // Real Engine Compute (Parallel)
+    const [dailyWeather, baselineVector] = await Promise.all([
+      getDailyWeather(userId, dateLocal, timezone, city),
+      getBaselineVector(userId, baseRes.data.dob, baseRes.data.birth_time, baseRes.data.birth_city, timezone)
+    ]);
+
+    if (!dailyWeather || !baselineVector) {
+      return NextResponse.json({ error: "DATA_UNAVAILABLE" }, { status: 503, headers: corsHeaders(req) });
+    }
+
+    // Build Response
     const insights = [
-      { title: "Energy Style", category: "energy_style", content: "You work best when you respond to what is real in front of you. Reduce self-pressure. Choose fewer, cleaner actions." },
-      { title: "Friction", category: "friction", content: "When tension rises, your system moves fast. Slow down first. Ask one clarifying question before acting." },
-      { title: "Family Echoes", category: "family_echoes", content: "If you feel responsible for everyone’s mood, pause. That pattern is learned. You can step out without abandoning anyone." },
-      { title: "Daily Weather", category: "daily_weather", content: "Today is suited for clean decisions. Avoid loaded conversations late at night." },
+      {
+        title: "Daily Weather",
+        category: "daily_weather",
+        content: `Pressure Score: ${dailyWeather.pressure_score}. Band: ${dailyWeather.weather_band}.`
+      },
+      ...dailyWeather.signals.map(s => ({
+        title: "Signal",
+        category: "signal",
+        content: `${s.key} (Strength: ${s.strength.toFixed(2)})`
+      }))
     ];
 
-    return NextResponse.json({ locked: false, insights }, { headers });
+    return NextResponse.json({
+      locked: false,
+      daily_weather: dailyWeather,
+      baseline_vector: baselineVector,
+      insights
+    }, { headers });
   } catch (err) {
     return errorToResponse(err);
   }
