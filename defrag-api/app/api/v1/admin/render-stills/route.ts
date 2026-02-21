@@ -94,7 +94,7 @@ export async function POST(req: Request) {
         .from("asset_cache_public")
         .update({
           status: "READY",
-          url: uploaded.url,
+          url: uploaded.publicUrl, // Fix: Changed from .url to .publicUrl
           width: rendered.width,
           height: rendered.height,
           duration_seconds: null,

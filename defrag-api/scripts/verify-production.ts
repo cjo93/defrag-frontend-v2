@@ -27,9 +27,10 @@ async function verify() {
   // 2. Trigger Compute Day (Dry run concept, or actual?)
   // This is operational. We will trigger it.
   console.log("\n--- Triggering Compute Day ---");
+  const headers: Record<string, string> = { "x-defrag-admin-key": ADMIN_KEY as string };
   const resCompute = await fetch(`${API_URL}/api/v1/admin/compute-day`, {
     method: "POST",
-    headers: { "x-defrag-admin-key": ADMIN_KEY }
+    headers: headers
   });
 
   if (resCompute.ok) {
@@ -46,7 +47,7 @@ async function verify() {
   console.log("\n--- Triggering Render Stills ---");
   const resRender = await fetch(`${API_URL}/api/v1/admin/render-stills?limit=5`, {
     method: "POST",
-    headers: { "x-defrag-admin-key": ADMIN_KEY }
+    headers: headers
   });
 
   if (resRender.ok) {
