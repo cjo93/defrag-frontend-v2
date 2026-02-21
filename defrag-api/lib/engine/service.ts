@@ -22,7 +22,6 @@ export function checkRateLimit(key: string): boolean {
   const last = rateLimitMap.get(key) || 0;
   if (now - last < RATE_LIMIT_WINDOW) return false;
   rateLimitMap.set(key, now);
-  // Cleanup old keys
   if (rateLimitMap.size > 1000) rateLimitMap.clear();
   return true;
 }
@@ -106,21 +105,6 @@ async function recomputeDailyWeather(
   city: string,
   inputsHash: string
 ): Promise<DailyWeatherOutput | null> {
-  // STRICT WINDOW: Local Day 00:00 - 23:59 converted to UTC
-  // dateLocal is "YYYY-MM-DD"
-
-  // Construct Start of Day in Local Time
-  // We use string manipulation to avoid browser timezone issues
-  // "YYYY-MM-DD" + "T00:00:00"
-  // Note: Date parsing is tricky. Ideally use a library like 'date-fns-tz' but we are stdlib only.
-  // Best approach for backend: Treat dateLocal as the date in the user's timezone.
-
-  // 1. Find UTC start/end for that local date.
-  // We need to fetch enough hours from Horizons to cover it.
-  // Since we don't have a timezone library, we will fetch a generous 48h window (local date -1 to +2)
-  // and then FILTER strictly based on the converted timestamp.
-  // This ensures we have the data without needing precise UTC offset calc upfront.
-
   const d = new Date(dateLocal);
   const start = new Date(d); start.setDate(d.getDate() - 1);
   const end = new Date(d); end.setDate(d.getDate() + 2);
@@ -137,7 +121,6 @@ async function recomputeDailyWeather(
   try {
     const horizons = await fetchHorizonsEphemeris(params);
 
-    // Store run
     const runRes = await supabaseAdmin.from("horizons_runs").insert({
       user_id: userId,
       kind: "daily_weather",
@@ -151,15 +134,12 @@ async function recomputeDailyWeather(
 
     const horizonsRunId = runRes.data?.id;
 
-    // Filter steps strictly for local day
     const steps: { t_utc: string; lon: Record<string, number> }[] = [];
     const timestamps = horizons.parsed["10"]?.map(x => x.date) || [];
 
     for (let i = 0; i < timestamps.length; i++) {
       const t = timestamps[i];
       const dateObj = new Date(t + " UTC");
-
-      // Check local date string in user timezone
       const localDateStr = dateObj.toLocaleDateString("en-CA", { timeZone: timezone });
 
       if (localDateStr === dateLocal) {
@@ -220,7 +200,6 @@ export async function getBaselineVector(
   const cached = await getCachedOutput(userId, "baseline_vector", inputsHash);
   if (cached) return cached as BaselineVectorOutput;
 
-  // Recompute
   const startUtc = dob;
   const d = new Date(dob);
   const nextD = new Date(d); nextD.setDate(d.getDate() + 1);
@@ -247,7 +226,6 @@ export async function getBaselineVector(
     }).select("id").single();
     const horizonsRunId = runRes.data?.id;
 
-    // Find nearest step to birth time
     const targetHour = birthTime ? parseInt(birthTime.split(":")[0]) : 12;
     const timestamps = horizons.parsed["10"]?.map(x => x.date) || [];
 
@@ -350,206 +328,6 @@ export async function getFriction(
 // --- Phase 1: Compute Day Orchestration Helpers ---
 
 export async function getOrFetchHorizonsRun(utcDate: string) {
-  // utcDate is "YYYY-MM-DD"
-  // Check if we already have a run covering this day
-  // We look for a run where start_utc <= utcDate and stop_utc >= utcDate + 1 day
-  // Just reusing recomputeDailyWeather logic but exposing the raw run is complex because
-  // recomputeDailyWeather logic is tied to "Local Day".
-  // Here we want a "UTC Day" run.
-
-  // For V1 simplicity: Fetch strictly the UTC day window.
-  const startUtc = utcDate;
-  const d = new Date(utcDate);
-  const nextD = new Date(d); nextD.setDate(d.getDate() + 1);
-  const stopUtc = nextD.toISOString().split("T")[0];
-
-  // Check DB for existing run with this exact window
-  // (In V1 we might have multiple runs if we aren't careful, but we want to reuse)
-  const { data: existing } = await supabaseAdmin
-    .from("horizons_runs")
-    .select("raw_hash, raw_text, created_at")
-    .eq("start_utc", startUtc)
-    .eq("stop_utc", stopUtc)
-    .eq("step_minutes", 60)
-    .eq("kind", "daily_weather") // Reuse the kind
-    .limit(1)
-    .maybeSingle();
-
-  if (existing) {
-    // Parse it again to return structured data
-    // Ideally we cache parsed structure but for now re-parse is fine
-    // We need to import the parse logic?
-    // Actually, getOrFetchHorizonsRun caller expects { raw_hash, date, parsed? }
-    // The prompt says: "Reuse same row for entire batch... Return { raw, raw_hash }"
-    // It implies we pass the *parsed* object to the next step?
-    // Looking at compute-day route:
-    // const horizons = await getOrFetchHorizonsRun(utcDate);
-    // await computeFrictionForConnection({ horizons, ... });
-    // So "horizons" object needs to contain what computeFrictionForConnection needs.
-    // computeFrictionForConnection needs to extract steps.
-
-    // We can just return the raw text and let a helper re-parse it, OR export the parser.
-    // Let's rely on fetchHorizonsEphemeris logic which does fetching.
-    // But we want to avoid fetching if DB has it.
-
-    // Re-importing parse logic is tricky if not exported.
-    // I will export parseHorizonsResponse from horizons.ts or move it.
-    // For now, let's assume we can fetch if missing, or use raw if present.
-
-    // To match the requested "drop-in" nature, I will implement a simpler version:
-    // Always call fetchHorizonsEphemeris but pass it "DB Cache Check" logic?
-    // No, fetchHorizonsEphemeris is low level.
-
-    // I will implement a fetch-or-load here.
-    // I need to export  from  to be efficient?
-    // Or just re-parse the raw text.
-
-    // Let's modify  to export  is the clean way.
-    // But I can't easily edit that file without a full rewrite in this tool.
-    // I'll just duplicate the parse logic or regex it here? No, "No Theatre".
-    // I will fetch again if I can't parse easily? No, that wastes quotas.
-
-    // Better: I'll use the existing  but allow it to return "cached" if I pass a flag?
-    // No,  does HTTP calls.
-
-    // Plan:
-    // 1. Try to fetch from DB.
-    // 2. If missing, call fetchHorizonsEphemeris -> returns { rawText, rawHash, parsed }.
-    // 3. Store in DB.
-    // 4. Return { raw_hash, raw_text, parsed }.
-
-    // I need to parse the raw text if it came from DB.
-    // I will append a parser helper here.
-  }
-
-  // FETCH NEW
-  const params: HorizonsParams = {
-    startUtc,
-    stopUtc,
-    step: "60m",
-  };
-
-  try {
-    const res = await fetchHorizonsEphemeris(params);
-    // Store
-    await supabaseAdmin.from("horizons_runs").insert({
-        kind: "daily_weather", // Shared kind
-        request_json: params,
-        raw_text: res.rawText,
-        raw_hash: res.rawHash,
-        start_utc: startUtc,
-        stop_utc: stopUtc,
-        step_minutes: 60,
-    });
-
-    return {
-        raw_hash: res.rawHash,
-        parsed: res.parsed,
-        raw_text: res.rawText
-    };
-  } catch (e) {
-    console.error("Horizons fetch failed", e);
-    return null;
-  }
-}
-
-// Helper to re-parse raw text (duplicated from horizons.ts to avoid modify file)
-// Ideally this should be shared.
-function parseRawText(text: string) {
-    // ... Implement minimal parser or rely on fetch logic ...
-    // Since I cannot easily modify horizons.ts in "append" mode, I will just assume
-    // for this step that we always FETCH (if that's acceptable for V1) or
-    // I will rewrite horizons.ts to export the parser in a separate step?
-    // User said: "Reuse same row for entire batch".
-    // So within one execution of , we fetch ONCE.
-    //  calls  once.
-    // So the caching is primarily in-memory for the batch, or DB for retries?
-    // The prompt says "Fetch once per UTC date".
-    // So I must handle the DB load.
-
-    // I will overwrite  to export  in the next step
-    // to make this clean.
-    return {};
-}
-
-export async function computeFrictionForConnection(args: {
-  horizons: { parsed: any, raw_hash: string },
-  userId: string,
-  connectionId: string,
-  engineVersion: string
-}) {
-  // 1. Get User Baseline
-  // 2. Get Connection Baseline
-  // 3. Compute Daily Weather (max step)
-  // 4. Compute Friction
-
-  // We need to fetch baselines from DB (engine_outputs) or recompute them.
-  // This is complex orchestration.
-  //  in this file handles fetch-or-compute.
-
-  // Fetch Context
-  const { data: ctx } = await supabaseAdmin.from("user_context").select("city,timezone").eq("user_id", args.userId).maybeSingle();
-  const { data: uBase } = await supabaseAdmin.from("baselines").select("dob,birth_time,birth_city").eq("user_id", args.userId).maybeSingle();
-  const { data: cBase } = await supabaseAdmin.from("connections").select("dob,birth_time,birth_city").eq("id", args.connectionId).single();
-
-  if (!uBase || !cBase) return null;
-
-  const timezone = ctx?.timezone || "UTC";
-  const city = ctx?.city || uBase.birth_city;
-  const now = new Date();
-  const dateLocal = new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(now);
-
-  const uVector = await getBaselineVector(args.userId, uBase.dob, uBase.birth_time, uBase.birth_city, timezone);
-  const cVector = await getBaselineVector(args.userId, cBase.dob, cBase.birth_time, cBase.birth_city || "Unknown", timezone);
-
-  if (!uVector || !cVector) return null;
-
-  // Compute Daily Weather from the SHARED horizons run
-  // We need to extract the steps relevant to the local day from the shared run
-  // args.horizons.parsed has the data.
-  // We need to run  logic.
-
-  // Filter steps (Logic duplicated from recomputeDailyWeather but using passed horizons)
-  const steps: { t_utc: string; lon: Record<string, number> }[] = [];
-  const timestamps = args.horizons.parsed["10"]?.map((x: any) => x.date) || [];
-
-  for (let i = 0; i < timestamps.length; i++) {
-      const t = timestamps[i];
-      const dateObj = new Date(t + " UTC");
-      const localDateStr = dateObj.toLocaleDateString("en-CA", { timeZone: timezone });
-
-      if (localDateStr === dateLocal) {
-        const stepLon: Record<string, number> = {};
-        let missing = false;
-        for (const bodyId in args.horizons.parsed) {
-          const entry = args.horizons.parsed[bodyId][i];
-          if (!entry) { missing = true; break; }
-          stepLon[bodyId] = entry.lon;
-        }
-        if (!missing) steps.push({ t_utc: dateObj.toISOString(), lon: stepLon });
-      }
-  }
-
-  if (steps.length === 0) return null;
-
-  const provBase: Omit<Provenance, "computed_at_utc"> = {
-      source: "NASA_JPL_HORIZONS",
-      horizons_request: {},
-      horizons_response_hash: args.horizons.raw_hash,
-      engine_version: args.engineVersion as any,
-  };
-
-  const daily = computeDailyWeather(steps, dateLocal, timezone, provBase);
-  const friction = computeFriction(daily, uVector.baseline_vector, cVector.baseline_vector, provBase);
-
-  return {
-      pressure_score: daily.pressure_score,
-      friction_score: friction.friction_score,
-      provenance_hash: crypto.createHash("sha256").update(JSON.stringify(friction.provenance)).digest("hex")
-  };
-}
-
-export async function getOrFetchHorizonsRun(utcDate: string) {
   const startUtc = utcDate;
   const d = new Date(utcDate);
   const nextD = new Date(d); nextD.setDate(d.getDate() + 1);
@@ -567,11 +345,6 @@ export async function getOrFetchHorizonsRun(utcDate: string) {
     .maybeSingle();
 
   if (existing) {
-    // We need to parse this raw text to be useful
-    // For V1, to avoid circular deps or complex refactoring of horizons.ts which isn't exported,
-    // we will fetch fresh if we can't parse easily.
-    // BUT the requirement is "Reuse same row".
-    // I will implement a minimal parser here matching the horizons.ts logic.
     return {
         raw_hash: existing.raw_hash,
         parsed: parseHorizonsRawText(existing.raw_text),
@@ -611,7 +384,6 @@ export async function getOrFetchHorizonsRun(utcDate: string) {
 
 // Duplicated parser logic (safe because deterministic)
 function parseHorizonsRawText(text: string) {
-    // Expects combined raw text "--BODY X--\n..."
     const results: Record<string, { date: string; lon: number; lat: number }[]> = {};
     const parts = text.split("--BODY ");
     for (const part of parts) {
@@ -662,13 +434,10 @@ export async function computeFrictionForConnection(args: {
   if (!uVector || !cVector) return null;
 
   const steps: { t_utc: string; lon: Record<string, number> }[] = [];
-  // Use first body (10) for timestamps
   const timestamps = args.horizons.parsed["10"]?.map((x: any) => x.date) || [];
 
   for (let i = 0; i < timestamps.length; i++) {
       const t = timestamps[i];
-      // Horizons date format: "YYYY-Mmm-DD HH:MM"
-      // Date.parse handles this usually
       const dateObj = new Date(t.replace("A.D. ", "") + " UTC");
       const localDateStr = dateObj.toLocaleDateString("en-CA", { timeZone: timezone });
 
