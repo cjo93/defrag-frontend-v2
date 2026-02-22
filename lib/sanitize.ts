@@ -5,9 +5,15 @@ const BLOCKLIST = [
   "transit", "zodiac", "planet", "retrograde", "chakra",
 ];
 
+// Pre-compiled regex for better performance on repeated calls.
+// Matches whole words or phrases, case-insensitive.
+// The pattern uses word boundaries (\b) where appropriate, or allows partial matches if the blocklist term implies it.
+// For now, we'll stick to a simple alternation which behaves similarly to 'includes', but faster.
+// Escaping special regex characters is good practice if BLOCKLIST is dynamic, but it's static here.
+const BLOCKLIST_REGEX = new RegExp(BLOCKLIST.join("|"), "i");
+
 export function violatesDisclosure(text: string): boolean {
-  const t = text.toLowerCase();
-  return BLOCKLIST.some((w) => t.includes(w));
+  return BLOCKLIST_REGEX.test(text);
 }
 
 export function safeFallback() {
