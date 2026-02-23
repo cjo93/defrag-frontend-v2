@@ -21,13 +21,15 @@ export async function POST(req: Request) {
     const body = BodySchema.parse(await req.json());
 
     const isOS = body.mode === "os";
+    // Pricing: 2 for OS (subscription), 1 for Manual/Blueprint (payment)
     const price = isOS ? ENV.STRIPE_PRICE_OS : ENV.STRIPE_PRICE_BLUEPRINT;
 
     const session = await stripe.checkout.sessions.create({
       mode: isOS ? "subscription" : "payment",
       line_items: [{ price, quantity: 1 }],
       client_reference_id: userId,
-      metadata: { access_level: isOS ? "os_active" : "blueprint" },
+      // Metadata indicates what access level this purchase unlocks
+      metadata: { access_level: isOS ? "os_active" : "blueprint_unlocked" },
       success_url: `${ENV.APP_URL}${isOS ? "/grid" : "/readout/self"}?success=1`,
       cancel_url: `${ENV.APP_URL}/connect?canceled=1`,
     });
