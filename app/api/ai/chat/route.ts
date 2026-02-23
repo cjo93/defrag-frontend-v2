@@ -81,7 +81,12 @@ export async function POST(req: Request) {
     };
 
     // Call AI Gateway (OpenAI compatible)
-    const aiRes = await fetch(`${ENV.AI_GATEWAY_URL}/chat/completions`, {
+    // Use Vercel AI Gateway if available, otherwise fall back to legacy env var
+    const gatewayBase = process.env.VERCEL_AI_GATEWAY_URL
+      ? `${process.env.VERCEL_AI_GATEWAY_URL}/openai`
+      : ENV.AI_GATEWAY_URL;
+
+    const aiRes = await fetch(`${gatewayBase}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
