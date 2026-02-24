@@ -11,21 +11,16 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.994.0",
     "@aws-sdk/s3-request-presigner": "^3.994.0",
-    "@remotion/lambda": "^4.0.0",
-    "@remotion/react": "^4.0.0",
-    "@remotion/zod-types": "^4.0.0",
     "@resvg/resvg-js": "^2.6.2",
     "@supabase/supabase-js": "^2.97.0",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "remotion": "^4.0.0",
     "seedrandom": "^3.0.5",
     "stripe": "^20.3.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@remotion/cli": "^4.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
